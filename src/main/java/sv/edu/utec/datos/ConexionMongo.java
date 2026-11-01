@@ -6,6 +6,8 @@ import com.mongodb.ServerApiVersion;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoDatabase;
+
+
 /**
  * Punto unico de acceso a MongoDB Atlas.
  * La cadena de conexion NUNCA se escribe en el codigo: se lee de la
