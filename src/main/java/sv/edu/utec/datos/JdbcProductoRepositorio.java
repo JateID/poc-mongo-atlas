@@ -20,7 +20,10 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
     private static final String COLUMNAS =
             "codigo, nombre, categoria, precio, existencia";
 // ... aqui quedan los 11 metodos que genero IntelliJ ...
-    /** Ejecuta un SELECT con parametros y convierte cada fila en Producto. */
+
+    /**
+     * Ejecuta un SELECT con parametros y convierte cada fila en Producto.
+     */
     private List<Producto> consultar(String sql, Object... parametros) {
         List<Producto> resultado = new ArrayList<>();
         try (Connection cn = ConexionPostgres.obtener();
@@ -38,6 +41,7 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
             throw new RepositorioException("Error al consultar productos", e);
         }
     }
+
     private void asignarParametros(PreparedStatement ps, Producto p) throws SQLException {
         ps.setString(1, p.getCodigo());
         ps.setString(2, p.getNombre());
@@ -45,6 +49,7 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
         ps.setDouble(4, p.getPrecio());
         ps.setInt(5, p.getExistencia());
     }
+
     private Producto aProducto(ResultSet rs) throws SQLException {
         return new Producto(
                 rs.getString("codigo"),
@@ -53,7 +58,10 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
                 rs.getDouble("precio"),
                 rs.getInt("existencia"));
     }
-    /** Traduce el SQLState de PostgreSQL al idioma del negocio. */
+
+    /**
+     * Traduce el SQLState de PostgreSQL al idioma del negocio.
+     */
     private RepositorioException traducir(SQLException e, String codigo) {
         String estado = e.getSQLState();
         if (DUPLICADO.equals(estado)) {
@@ -67,6 +75,7 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
         return new RepositorioException(
                 "Error de base de datos [" + estado + "]: " + e.getMessage(), e);
     }
+
 
     // ------------------------------------------------------------------
 // C: Create
@@ -83,18 +92,19 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
         }
     }
 
-
+    // ------------------------------------------------------------------
+// D: Delete
+// ------------------------------------------------------------------
     @Override
-    public int insertarVarios(List<Producto> productos) {
-
-        int contador = 0;
-
-        for (Producto p : productos) {
-            insertar(p);
-            contador++;
+    public boolean eliminar(String codigo) {
+        try (Connection cn = ConexionPostgres.obtener();
+             PreparedStatement ps = cn.prepareStatement(
+                     "DELETE FROM producto WHERE codigo = ?")) {
+            ps.setString(1, codigo);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw traducir(e, codigo);
         }
-
-        return contador;
     }
 
     // ------------------------------------------------------------------
@@ -106,15 +116,18 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
                 "SELECT " + COLUMNAS + " FROM producto WHERE codigo = ?", codigo);
         return r.stream().findFirst();
     }
+
     @Override
     public List<Producto> listarTodos() {
         return consultar("SELECT " + COLUMNAS + " FROM producto ORDER BY codigo");
     }
-
     @Override
     public List<Producto> listarPorCategoria(String categoria) {
-        return consultar("SELECT " + COLUMNAS
-                + " FROM producto WHERE categoria = ? ORDER BY nombre", categoria);
+        return consultar(
+                "SELECT " + COLUMNAS +
+                        " FROM producto WHERE categoria = ? ORDER BY nombre",
+                categoria
+        );
     }
 
 
@@ -145,10 +158,10 @@ public class JdbcProductoRepositorio implements ProductoRepositorio {
     @Override
     public boolean actualizar(Producto p) {
         String sql = """
-UPDATE producto
-SET nombre = ?, categoria = ?, precio = ?, existencia = ?,
-actualizado_en = now()
-WHERE codigo = ?""";
+                UPDATE producto
+                SET nombre = ?, categoria = ?, precio = ?, existencia = ?,
+                actualizado_en = now()
+                WHERE codigo = ?""";
         try (Connection cn = ConexionPostgres.obtener();
              PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setString(1, p.getNombre());
@@ -161,6 +174,7 @@ WHERE codigo = ?""";
             throw traducir(e, p.getCodigo());
         }
     }
+
     @Override
     public boolean ajustarExistencia(String codigo, int cantidad) {
         if (cantidad == 0) {
@@ -168,9 +182,9 @@ WHERE codigo = ?""";
         }
 // Revisar y sumar/restar en UNA sentencia atomica dentro del servidor
         String sql = """
-UPDATE producto
-SET existencia = existencia + ?, actualizado_en = now()
-WHERE codigo = ? AND existencia + ? >= 0""";
+                UPDATE producto
+                SET existencia = existencia + ?, actualizado_en = now()
+                WHERE codigo = ? AND existencia + ? >= 0""";
         try (Connection cn = ConexionPostgres.obtener();
              PreparedStatement ps = cn.prepareStatement(sql)) {
             ps.setInt(1, cantidad);
@@ -183,21 +197,71 @@ WHERE codigo = ? AND existencia + ? >= 0""";
     }
 
     // ------------------------------------------------------------------
-// D: Delete
+// Reporte: GROUP BY hace lo que en MongoDB hacia $group
 // ------------------------------------------------------------------
     @Override
-    public boolean eliminar(String codigo) {
+    public List<ResumenCategoria> resumenPorCategoria() {
+        String sql = """
+                SELECT categoria,
+                COUNT(*) AS productos,
+                SUM(existencia) AS unidades,
+                SUM(precio * existencia) AS valor
+                FROM producto
+                GROUP BY categoria
+                ORDER BY valor DESC""";
+        List<ResumenCategoria> resultado = new ArrayList<>();
         try (Connection cn = ConexionPostgres.obtener();
-             PreparedStatement ps = cn.prepareStatement(
-                     "DELETE FROM producto WHERE codigo = ?")) {
-            ps.setString(1, codigo);
-            return ps.executeUpdate() > 0;
+             PreparedStatement ps = cn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                resultado.add(new ResumenCategoria(
+                        rs.getString("categoria"),
+                        rs.getInt("productos"),
+                        rs.getInt("unidades"),
+                        rs.getDouble("valor")));
+            }
+            return resultado;
         } catch (SQLException e) {
-            throw traducir(e, codigo);
+            throw new RepositorioException("Error al generar el reporte", e);
         }
     }
+    /** Todo o nada: si un producto falla, no se guarda ninguno. */
     @Override
-    public List<ResumenCategoria> resumenPorCategoria() {
-        return List.of();
+    public int insertarVarios(List<Producto> productos) {
+        String sql = "INSERT INTO producto (" + COLUMNAS + ") VALUES (?, ?, ?, ?, ?)";
+
+        try (Connection cn = ConexionPostgres.obtener()) {
+            cn.setAutoCommit(false);
+
+            try (PreparedStatement ps = cn.prepareStatement(sql)) {
+                for (Producto p : productos) {
+                    asignarParametros(ps, p);
+                    ps.addBatch();
+                }
+
+                ps.executeBatch();
+                cn.commit();
+
+                return productos.size();
+
+            } catch (SQLException e) {
+                cn.rollback();
+
+                throw new RepositorioException(
+                        "Carga cancelada, no se guardo ningun producto: " + motivo(e), e);
+            }
+
+        } catch (SQLException e) {
+            throw new RepositorioException("Error de conexion en la carga", e);
+        }
+    }
+    private String motivo(SQLException e) {
+        SQLException real = e.getNextException() != null
+                ? e.getNextException() : e;
+
+        return real.getMessage().lines().findFirst().orElse("");
     }
 }
+
+
+
